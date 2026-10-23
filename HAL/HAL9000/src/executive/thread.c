@@ -1277,3 +1277,29 @@ _ThreadKernelFunction(
     ThreadExit(exitStatus);
     NOT_REACHED;
 }
+
+INT64
+ThreadComparePriorityReadyList(
+    IN      PLIST_ENTRY         FirstElement,
+    IN      PLIST_ENTRY         SecondElement,
+    IN_OPT  PVOID               Context               
+    )
+{
+    PTHREAD pTh1;
+    PTHREAD pTh2;
+    THREAD_PRIORITY firstThreadPriority;
+    THREAD_PRIORITY secondThreadPriority;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    ASSERT(NULL != FirstElement);
+    ASSERT(NULL != SecondElement);
+
+    pTh1 = CONTAINING_RECORD(FirstElement, THREAD, ReadyList);
+    firstThreadPriority = ThreadGetPriority(pTh1);
+
+    pTh2 = CONTAINING_RECORD(SecondElement, THREAD, ReadyList);
+    secondThreadPriority = ThreadGetPriority(pTh2);
+
+    return (INT64)secondThreadPriority - (INT64)firstThreadPriority;
+}

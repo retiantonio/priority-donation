@@ -297,3 +297,23 @@ void
 ThreadSetPriority(
     IN      THREAD_PRIORITY     NewPriority
     );
+
+//******************************************************************************
+// Function:     ThreadComparePriorityReadyList
+// Description:  Compares two threads by priority, for use with
+//               InsertOrderedList(). Keeps lists sorted in descending order
+//               of priority. Threads with equal priority keep FIFO order
+//               (new entries are inserted after existing equals).
+// Returns:      INT64 - negative if the first thread has the higher priority,
+//                       positive if the second has the higher priority,
+//                       0 if equal
+// Parameter:    IN PLIST_ENTRY FirstElement
+// Parameter:    IN PLIST_ENTRY SecondElement
+// Parameter:    IN_OPT PVOID   Context
+//******************************************************************************
+INT64
+ThreadComparePriorityReadyList(
+    IN      PLIST_ENTRY         FirstElement,
+    IN      PLIST_ENTRY         SecondElement,
+    IN_OPT  PVOID               Context               
+    );

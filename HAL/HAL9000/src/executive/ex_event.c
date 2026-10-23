@@ -162,7 +162,8 @@ ExEventWaitForSignal(
     while (TRUE != AtomicCompareExchange8(&Event->Signaled, newState, TRUE))
     {
         LockAcquire(&Event->EventLock, &dummyState);
-        InsertTailList(&Event->WaitingList, &pCurrentThread->ReadyList);
+        //InsertTailList(&Event->WaitingList, &pCurrentThread->ReadyList);
+        InsertOrderedList(&Event->WaitingList, &pCurrentThread->ReadyList, ThreadComparePriorityReadyList, NULL);
         ThreadTakeBlockLock();
         LockRelease(&Event->EventLock, dummyState);
         ThreadBlock();

@@ -14,6 +14,7 @@
 #include "cal_atomic.h"
 #include "cal_assembly.h"
 #include "cal_seh.h"
+#include "smp.h"
 
 #define TID_INCREMENT               4
 
@@ -549,6 +550,52 @@ ThreadBlock(
     ASSERT( !LockIsOwner(&m_threadSystemData.ReadyThreadsLock));
 }
 
+static
+STATUS
+(CDECL _ThreadYieldForIpi)(
+    IN_OPT  PVOID   Context
+    )
+{
+    INTR_STATE oldState;
+    PPCPU pCpu;
+    PTHREAD pCurrentThread;
+    PLIST_ENTRY pEntry;
+    PTHREAD pHeadReadyThread;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    pCpu = GetCurrentPcpu();
+    ASSERT(NULL != pCpu);
+
+    pCurrentThread = GetCurrentThread();
+    ASSERT(NULL != pCurrentThread);
+
+    if (pCpu->ThreadData.IdleThread == pCurrentThread)
+    {
+        pCpu->ThreadData.YieldOnInterruptReturn = TRUE;
+        return STATUS_SUCCESS;
+    }
+
+    LockAcquire(&m_threadSystemData.ReadyThreadsLock, &oldState);
+
+    if(!IsListEmpty(&m_threadSystemData.ReadyThreadsList))
+    {
+        pEntry = m_threadSystemData.ReadyThreadsList.Flink;
+
+        pHeadReadyThread = CONTAINING_RECORD(pEntry, THREAD, ReadyList);
+        ASSERT(NULL != pHeadReadyThread);
+
+        if(ThreadGetPriority(pHeadReadyThread) > ThreadGetPriority(pCurrentThread))
+        {
+            pCpu->ThreadData.YieldOnInterruptReturn = TRUE;
+        }
+    }
+
+    LockRelease(&m_threadSystemData.ReadyThreadsLock, oldState);
+
+    return STATUS_SUCCESS;
+}
+
 void
 ThreadUnblock(
     IN      PTHREAD              Thread
@@ -556,6 +603,7 @@ ThreadUnblock(
 {
     INTR_STATE oldState;
     INTR_STATE dummyState;
+    //SMP_DESTINATION dest = { 0 };
 
     ASSERT(NULL != Thread);
 
@@ -569,6 +617,9 @@ ThreadUnblock(
     Thread->State = ThreadStateReady;
     LockRelease(&m_threadSystemData.ReadyThreadsLock, dummyState );
     LockRelease(&Thread->BlockLock, oldState);
+
+    //SmpSendGenericIpiEx ( _ThreadYieldForIpi , NULL , NULL , NULL , 
+    //                      FALSE , SmpIpiSendToAllIncludingSelf , dest );
 }
 
 void

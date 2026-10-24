@@ -575,6 +575,7 @@ STATUS
     if(!IsListEmpty(&m_threadSystemData.ReadyThreadsList))
     {
         pEntry = m_threadSystemData.ReadyThreadsList.Flink;
+        ASSERT(NULL != pEntry);
 
         pHeadReadyThread = CONTAINING_RECORD(pEntry, THREAD, ReadyList);
         ASSERT(NULL != pHeadReadyThread);
@@ -731,7 +732,7 @@ ThreadGetPriority(
     return (NULL != pThread) ? pThread->Priority : 0;
 }
 
-void
+/*void
 ThreadSetPriority(
     IN      THREAD_PRIORITY     NewPriority
     )
@@ -739,6 +740,51 @@ ThreadSetPriority(
     ASSERT(ThreadPriorityLowest <= NewPriority && NewPriority <= ThreadPriorityMaximum);
 
     GetCurrentThread()->Priority = NewPriority;
+}*/
+
+void
+ThreadSetPriority(
+    IN      THREAD_PRIORITY     NewPriority
+    )
+{
+    INTR_STATE oldState;
+    PTHREAD pCurrentThread;
+    PLIST_ENTRY pEntry;
+    PTHREAD pHeadReadyThread;
+    BOOLEAN mustYield;
+
+    pEntry = NULL;
+    mustYield = FALSE;
+
+    ASSERT(ThreadPriorityLowest <= NewPriority && NewPriority <= ThreadPriorityMaximum);
+
+    LockAcquire(&m_threadSystemData.ReadyThreadsLock, &oldState);
+
+    pCurrentThread = GetCurrentThread();
+    ASSERT(NULL != pCurrentThread);
+
+    pCurrentThread->Priority = NewPriority;
+
+    if(!IsListEmpty(&m_threadSystemData.ReadyThreadsList))
+    {
+        pEntry = m_threadSystemData.ReadyThreadsList.Flink;
+        ASSERT(NULL != pEntry);
+
+        pHeadReadyThread = CONTAINING_RECORD(pEntry, THREAD, ReadyList);
+        ASSERT(NULL != pHeadReadyThread);
+
+        if(ThreadGetPriority(pHeadReadyThread) > pCurrentThread->Priority)
+        {
+            mustYield = TRUE;
+        }
+    }
+
+    LockRelease(&m_threadSystemData.ReadyThreadsLock, oldState);
+
+    if(mustYield == TRUE)
+    {
+        ThreadYield();
+    }
 }
 
 STATUS

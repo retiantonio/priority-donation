@@ -600,22 +600,34 @@ ThreadUnblock(
     INTR_STATE oldState;
     INTR_STATE dummyState;
     SMP_DESTINATION dest = { 0 };
+    BOOLEAN sendIpi;
 
     ASSERT(NULL != Thread);
+
+    sendIpi = FALSE;
 
     LockAcquire(&Thread->BlockLock, &oldState);
 
     ASSERT(ThreadStateBlocked == Thread->State);
 
     LockAcquire(&m_threadSystemData.ReadyThreadsLock, &dummyState);
-    //InsertTailList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList); 
-    InsertOrderedList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList, ThreadComparePriorityReadyList, NULL);
+    InsertOrderedList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList,
+                      ThreadComparePriorityReadyList, NULL);
+
+    if(m_threadSystemData.ReadyThreadsList.Flink == &Thread->ReadyList)
+    {
+        sendIpi = TRUE;
+    }
+
     Thread->State = ThreadStateReady;
-    LockRelease(&m_threadSystemData.ReadyThreadsLock, dummyState );
+    LockRelease(&m_threadSystemData.ReadyThreadsLock, dummyState);
     LockRelease(&Thread->BlockLock, oldState);
 
-    SmpSendGenericIpiEx(_ThreadYieldForIpi , NULL , NULL , NULL , 
-                        FALSE , SmpIpiSendToAllIncludingSelf , dest );
+    if(sendIpi == TRUE)
+    {
+        SmpSendGenericIpiEx(_ThreadYieldForIpi, NULL, NULL, NULL,
+                            FALSE, SmpIpiSendToAllIncludingSelf, dest);
+    }
 }
 
 void

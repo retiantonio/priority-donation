@@ -113,7 +113,7 @@ index e29ae8b..cf9b496 100644
          LockRelease(&Mutex->MutexLock, dummyState);
          ThreadBlock();
 diff --git a/HAL/HAL9000/src/executive/thread.c b/HAL/HAL9000/src/executive/thread.c
-index 0af1be6..b788a72 100644
+index 0af1be6..8e3635f 100644
 --- a/HAL/HAL9000/src/executive/thread.c
 +++ b/HAL/HAL9000/src/executive/thread.c
 @@ -14,6 +14,7 @@
@@ -183,31 +183,45 @@ index 0af1be6..b788a72 100644
  void
  ThreadUnblock(
      IN      PTHREAD              Thread
-@@ -555,6 +599,7 @@ ThreadUnblock(
+@@ -555,18 +599,35 @@ ThreadUnblock(
  {
      INTR_STATE oldState;
      INTR_STATE dummyState;
 +    SMP_DESTINATION dest = { 0 };
++    BOOLEAN sendIpi;
  
      ASSERT(NULL != Thread);
  
-@@ -563,10 +608,14 @@ ThreadUnblock(
++    sendIpi = FALSE;
++
+     LockAcquire(&Thread->BlockLock, &oldState);
+ 
      ASSERT(ThreadStateBlocked == Thread->State);
  
      LockAcquire(&m_threadSystemData.ReadyThreadsLock, &dummyState);
 -    InsertTailList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList);
-+    //InsertTailList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList); 
-+    InsertOrderedList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList, ThreadComparePriorityReadyList, NULL);
++    InsertOrderedList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList,
++                      ThreadComparePriorityReadyList, NULL);
++
++    if(m_threadSystemData.ReadyThreadsList.Flink == &Thread->ReadyList)
++    {
++        sendIpi = TRUE;
++    }
++
      Thread->State = ThreadStateReady;
-     LockRelease(&m_threadSystemData.ReadyThreadsLock, dummyState );
+-    LockRelease(&m_threadSystemData.ReadyThreadsLock, dummyState );
++    LockRelease(&m_threadSystemData.ReadyThreadsLock, dummyState);
      LockRelease(&Thread->BlockLock, oldState);
 +
-+    SmpSendGenericIpiEx(_ThreadYieldForIpi , NULL , NULL , NULL , 
-+                        FALSE , SmpIpiSendToAllIncludingSelf , dest );
++    if(sendIpi == TRUE)
++    {
++        SmpSendGenericIpiEx(_ThreadYieldForIpi, NULL, NULL, NULL,
++                            FALSE, SmpIpiSendToAllIncludingSelf, dest);
++    }
  }
  
  void
-@@ -683,7 +732,7 @@ ThreadGetPriority(
+@@ -683,7 +744,7 @@ ThreadGetPriority(
      return (NULL != pThread) ? pThread->Priority : 0;
  }
  
@@ -216,7 +230,7 @@ index 0af1be6..b788a72 100644
  ThreadSetPriority(
      IN      THREAD_PRIORITY     NewPriority
      )
-@@ -691,6 +740,51 @@ ThreadSetPriority(
+@@ -691,6 +752,51 @@ ThreadSetPriority(
      ASSERT(ThreadPriorityLowest <= NewPriority && NewPriority <= ThreadPriorityMaximum);
  
      GetCurrentThread()->Priority = NewPriority;
@@ -268,7 +282,7 @@ index 0af1be6..b788a72 100644
  }
  
  STATUS
-@@ -1276,4 +1370,30 @@ _ThreadKernelFunction(
+@@ -1276,4 +1382,30 @@ _ThreadKernelFunction(
  
      ThreadExit(exitStatus);
      NOT_REACHED;
@@ -299,4 +313,268 @@ index 0af1be6..b788a72 100644
 +
 +    return (INT64)secondThreadPriority - (INT64)firstThreadPriority;
  }
+\ No newline at end of file
+diff --git a/priority_scheduler.diff b/priority_scheduler.diff
+new file mode 100644
+index 0000000..691d5eb
+--- /dev/null
++++ b/priority_scheduler.diff
+@@ -0,0 +1,257 @@
++diff --git a/HAL/HAL9000/headers/executive/thread_internal.h b/HAL/HAL9000/headers/executive/thread_internal.h
++index 64103a8..d4b532a 100644
++--- a/HAL/HAL9000/headers/executive/thread_internal.h
+++++ b/HAL/HAL9000/headers/executive/thread_internal.h
++@@ -297,3 +297,23 @@ void
++ ThreadSetPriority(
++     IN      THREAD_PRIORITY     NewPriority
++     );
+++
+++//******************************************************************************
+++// Function:     ThreadComparePriorityReadyList
+++// Description:  Compares two threads by priority, for use with
+++//               InsertOrderedList(). Keeps lists sorted in descending order
+++//               of priority. Threads with equal priority keep FIFO order
+++//               (new entries are inserted after existing equals).
+++// Returns:      INT64 - negative if the first thread has the higher priority,
+++//                       positive if the second has the higher priority,
+++//                       0 if equal
+++// Parameter:    IN PLIST_ENTRY FirstElement
+++// Parameter:    IN PLIST_ENTRY SecondElement
+++// Parameter:    IN_OPT PVOID   Context
+++//******************************************************************************
+++INT64
+++ThreadComparePriorityReadyList(
+++    IN      PLIST_ENTRY         FirstElement,
+++    IN      PLIST_ENTRY         SecondElement,
+++    IN_OPT  PVOID               Context               
+++    );
++diff --git a/HAL/HAL9000/src/executive/ex_event.c b/HAL/HAL9000/src/executive/ex_event.c
++index ec3f201..f747f42 100644
++--- a/HAL/HAL9000/src/executive/ex_event.c
+++++ b/HAL/HAL9000/src/executive/ex_event.c
++@@ -95,7 +95,7 @@ ExEventSetName(
++     LockRelease(&Event->EventLock, oldState);
++ }
++ 
++-void
+++/*void
++ ExEventSignal(
++     INOUT   EX_EVENT*      Event
++     )
++@@ -128,6 +128,48 @@ ExEventSignal(
++     }
++ 
++     LockRelease(&Event->EventLock, oldState);
+++}*/
+++
+++void
+++ExEventSignal(
+++    INOUT   EX_EVENT*      Event
+++    )
+++{
+++    INTR_STATE oldState;
+++    PLIST_ENTRY pEntry;
+++    LIST_ENTRY wakeUpList;
+++
+++    ASSERT(NULL != Event);
+++
+++    pEntry = NULL;
+++
+++    InitializeListHead(&wakeUpList);
+++
+++    LockAcquire(&Event->EventLock, &oldState);
+++    AtomicExchange8(&Event->Signaled, TRUE);
+++
+++    for (pEntry = RemoveHeadList(&Event->WaitingList);
+++         pEntry != &Event->WaitingList;
+++         pEntry = RemoveHeadList(&Event->WaitingList))
+++    {
+++        InsertTailList(&wakeUpList, pEntry);
+++
+++        if (ExEventTypeSynchronization == Event->EventType)
+++        {
+++            // sorry, we only wake one thread
+++            // we must not clear the signal here, because the first thread which will
+++            // wake up will claar it :)
+++            break;
+++        }
+++    }
+++    LockRelease(&Event->EventLock, oldState);
+++
+++    while (!IsListEmpty(&wakeUpList))
+++    {
+++        pEntry = RemoveHeadList(&wakeUpList);
+++        PTHREAD pThreadToSignal = CONTAINING_RECORD(pEntry, THREAD, ReadyList);
+++        ThreadUnblock(pThreadToSignal);
+++    }
++ }
++ 
++ void
++@@ -162,7 +204,8 @@ ExEventWaitForSignal(
++     while (TRUE != AtomicCompareExchange8(&Event->Signaled, newState, TRUE))
++     {
++         LockAcquire(&Event->EventLock, &dummyState);
++-        InsertTailList(&Event->WaitingList, &pCurrentThread->ReadyList);
+++        //InsertTailList(&Event->WaitingList, &pCurrentThread->ReadyList);
+++        InsertOrderedList(&Event->WaitingList, &pCurrentThread->ReadyList, ThreadComparePriorityReadyList, NULL);
++         ThreadTakeBlockLock();
++         LockRelease(&Event->EventLock, dummyState);
++         ThreadBlock();
++diff --git a/HAL/HAL9000/src/executive/mutex.c b/HAL/HAL9000/src/executive/mutex.c
++index e29ae8b..cf9b496 100644
++--- a/HAL/HAL9000/src/executive/mutex.c
+++++ b/HAL/HAL9000/src/executive/mutex.c
++@@ -122,7 +122,8 @@ MutexAcquire(
++ 
++     while (Mutex->Holder != pCurrentThread)
++     {
++-        InsertTailList(&Mutex->WaitingList, &pCurrentThread->ReadyList);
+++        //InsertTailList(&Mutex->WaitingList, &pCurrentThread->ReadyList);
+++        InsertOrderedList(&Mutex->WaitingList, &pCurrentThread->ReadyList, ThreadComparePriorityReadyList, NULL);
++         ThreadTakeBlockLock();
++         LockRelease(&Mutex->MutexLock, dummyState);
++         ThreadBlock();
++diff --git a/HAL/HAL9000/src/executive/thread.c b/HAL/HAL9000/src/executive/thread.c
++index 0af1be6..8e3635f 100644
++--- a/HAL/HAL9000/src/executive/thread.c
+++++ b/HAL/HAL9000/src/executive/thread.c
++@@ -14,6 +14,7 @@
++ #include "cal_atomic.h"
++ #include "cal_assembly.h"
++ #include "cal_seh.h"
+++#include "smp.h"
++ 
++ #define TID_INCREMENT               4
++ 
++@@ -508,7 +509,8 @@ ThreadYield(
++     LockAcquire(&m_threadSystemData.ReadyThreadsLock, &dummyState);
++     if (pThread != pCpu->ThreadData.IdleThread)
++     {
++-        InsertTailList(&m_threadSystemData.ReadyThreadsList, &pThread->ReadyList);
+++        //InsertTailList(&m_threadSystemData.ReadyThreadsList, &pThread->ReadyList);
+++        InsertOrderedList(&m_threadSystemData.ReadyThreadsList, &pThread->ReadyList, ThreadComparePriorityReadyList, NULL);
++     }
++     if (!bForcedYield)
++     {
++@@ -548,6 +550,48 @@ ThreadBlock(
++     ASSERT( !LockIsOwner(&m_threadSystemData.ReadyThreadsLock));
++ }
++ 
+++static
+++STATUS
+++(CDECL _ThreadYieldForIpi)(
+++    IN_OPT  PVOID   Context
+++    )
+++{
+++    INTR_STATE oldState;
+++    PPCPU pCpu;
+++    PTHREAD pCurrentThread;
+++    PLIST_ENTRY pEntry;
+++    PTHREAD pHeadReadyThread;
+++
+++    UNREFERENCED_PARAMETER(Context);
+++
+++    pCpu = GetCurrentPcpu();
+++    ASSERT(NULL != pCpu);
+++
+++    pCurrentThread = GetCurrentThread();
+++    ASSERT(NULL != pCurrentThread);
+++
+++    LockAcquire(&m_threadSystemData.ReadyThreadsLock, &oldState);
+++
+++    if(!IsListEmpty(&m_threadSystemData.ReadyThreadsList))
+++    {
+++        pEntry = m_threadSystemData.ReadyThreadsList.Flink;
+++        ASSERT(NULL != pEntry);
+++
+++        pHeadReadyThread = CONTAINING_RECORD(pEntry, THREAD, ReadyList);
+++        ASSERT(NULL != pHeadReadyThread);
+++
+++        if(pCpu->ThreadData.IdleThread == pCurrentThread ||
+++            ThreadGetPriority(pHeadReadyThread) > ThreadGetPriority(pCurrentThread))
+++        {
+++            pCpu->ThreadData.YieldOnInterruptReturn = TRUE;
+++        }
+++    }
+++
+++    LockRelease(&m_threadSystemData.ReadyThreadsLock, oldState);
+++
+++    return STATUS_SUCCESS;
+++}
+++
++ void
++ ThreadUnblock(
++     IN      PTHREAD              Thread
++@@ -555,18 +599,35 @@ ThreadUnblock(
++ {
++     INTR_STATE oldState;
++     INTR_STATE dummyState;
+++    SMP_DESTINATION dest = { 0 };
+++    BOOLEAN sendIpi;
++ 
++     ASSERT(NULL != Thread);
++ 
+++    sendIpi = FALSE;
+++
++     LockAcquire(&Thread->BlockLock, &oldState);
++ 
++     ASSERT(ThreadStateBlocked == Thread->State);
++ 
++     LockAcquire(&m_threadSystemData.ReadyThreadsLock, &dummyState);
++-    InsertTailList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList);
+++    InsertOrderedList(&m_threadSystemData.ReadyThreadsList, &Thread->ReadyList,
+++                      ThreadComparePriorityReadyList, NULL);
+++
+++    if(m_threadSystemData.ReadyThreadsList.Flink == &Thread->ReadyList)
+++    {
+++        sendIpi = TRUE;
+++    }
+++
++     Thread->State = ThreadStateReady;
++-    LockRelease(&m_threadSystemData.ReadyThreadsLock, dummyState );
+++    LockRelease(&m_threadSystemData.ReadyThreadsLock, dummyState);
++     LockRelease(&Thread->BlockLock, oldState);
+++
+++    if(sendIpi == TRUE)
+++    {
+++        SmpSendGenericIpiEx(_ThreadYieldForIpi, NULL, NULL, NULL,
+++                            FALSE, SmpIpiSendToAllIncludingSelf, dest);
+++    }
++ }
++ 
++ void
++@@ -683,7 +744,7 @@ ThreadGetPriority(
++     return (NULL != pThread) ? pThread->Priority : 0;
++ }
++ 
++-void
+++/*void
++ ThreadSetPriority(
++     IN      THREAD_PRIORITY     NewPriority
++     )
++@@ -691,6 +752,51 @@ ThreadSetPriority(
++     ASSERT(ThreadPriorityLowest <= NewPriority && NewPriority <= ThreadPriorityMaximum);
++ 
++     GetCurrentThread()->Priority = NewPriority;
+++}*/
+++
+++void
+++ThreadSetPriority(
+++    IN      THREAD_PRIORITY     NewPriority
+++    )
+++{
+++    INTR_STATE oldState;
+++    PTHREAD pCurrentThread;
+++    PLIST_ENTRY pEntry;
+++    PTHREAD pHeadReadyThread;
+++    BOOLEAN mustYield;
+++
+++    pEntry = NULL;
+++    mustYield = FALSE;
+++
+++    ASSERT(ThreadPriorityLowest <= NewPriority && NewPriority <= ThreadPriorityMaximum);
+++
+++    LockAcquire(&m_threadSystemData.ReadyThreadsLock, &oldState);
+++
+++    pCurren
 \ No newline at end of file

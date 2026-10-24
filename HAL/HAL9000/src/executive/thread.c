@@ -570,12 +570,6 @@ STATUS
     pCurrentThread = GetCurrentThread();
     ASSERT(NULL != pCurrentThread);
 
-    if (pCpu->ThreadData.IdleThread == pCurrentThread)
-    {
-        pCpu->ThreadData.YieldOnInterruptReturn = TRUE;
-        return STATUS_SUCCESS;
-    }
-
     LockAcquire(&m_threadSystemData.ReadyThreadsLock, &oldState);
 
     if(!IsListEmpty(&m_threadSystemData.ReadyThreadsList))
@@ -585,7 +579,8 @@ STATUS
         pHeadReadyThread = CONTAINING_RECORD(pEntry, THREAD, ReadyList);
         ASSERT(NULL != pHeadReadyThread);
 
-        if(ThreadGetPriority(pHeadReadyThread) > ThreadGetPriority(pCurrentThread))
+        if(pCpu->ThreadData.IdleThread == pCurrentThread ||
+            ThreadGetPriority(pHeadReadyThread) > ThreadGetPriority(pCurrentThread))
         {
             pCpu->ThreadData.YieldOnInterruptReturn = TRUE;
         }
@@ -603,7 +598,7 @@ ThreadUnblock(
 {
     INTR_STATE oldState;
     INTR_STATE dummyState;
-    //SMP_DESTINATION dest = { 0 };
+    SMP_DESTINATION dest = { 0 };
 
     ASSERT(NULL != Thread);
 
@@ -618,8 +613,8 @@ ThreadUnblock(
     LockRelease(&m_threadSystemData.ReadyThreadsLock, dummyState );
     LockRelease(&Thread->BlockLock, oldState);
 
-    //SmpSendGenericIpiEx ( _ThreadYieldForIpi , NULL , NULL , NULL , 
-    //                      FALSE , SmpIpiSendToAllIncludingSelf , dest );
+    SmpSendGenericIpiEx(_ThreadYieldForIpi , NULL , NULL , NULL , 
+                        FALSE , SmpIpiSendToAllIncludingSelf , dest );
 }
 
 void

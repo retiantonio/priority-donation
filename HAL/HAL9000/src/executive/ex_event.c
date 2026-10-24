@@ -95,7 +95,7 @@ ExEventSetName(
     LockRelease(&Event->EventLock, oldState);
 }
 
-void
+/*void
 ExEventSignal(
     INOUT   EX_EVENT*      Event
     )
@@ -128,6 +128,48 @@ ExEventSignal(
     }
 
     LockRelease(&Event->EventLock, oldState);
+}*/
+
+void
+ExEventSignal(
+    INOUT   EX_EVENT*      Event
+    )
+{
+    INTR_STATE oldState;
+    PLIST_ENTRY pEntry;
+    LIST_ENTRY wakeUpList;
+
+    ASSERT(NULL != Event);
+
+    pEntry = NULL;
+
+    InitializeListHead(&wakeUpList);
+
+    LockAcquire(&Event->EventLock, &oldState);
+    AtomicExchange8(&Event->Signaled, TRUE);
+
+    for (pEntry = RemoveHeadList(&Event->WaitingList);
+         pEntry != &Event->WaitingList;
+         pEntry = RemoveHeadList(&Event->WaitingList))
+    {
+        InsertTailList(&wakeUpList, pEntry);
+
+        if (ExEventTypeSynchronization == Event->EventType)
+        {
+            // sorry, we only wake one thread
+            // we must not clear the signal here, because the first thread which will
+            // wake up will claar it :)
+            break;
+        }
+    }
+    LockRelease(&Event->EventLock, oldState);
+
+    while (!IsListEmpty(&wakeUpList))
+    {
+        pEntry = RemoveHeadList(&wakeUpList);
+        PTHREAD pThreadToSignal = CONTAINING_RECORD(pEntry, THREAD, ReadyList);
+        ThreadUnblock(pThreadToSignal);
+    }
 }
 
 void

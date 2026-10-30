@@ -4,6 +4,7 @@
 #include "ref_cnt.h"
 #include "ex_event.h"
 #include "thread.h"
+#include "mutex.h"
 
 typedef enum _THREAD_STATE
 {
@@ -41,8 +42,16 @@ typedef struct _THREAD
     TID                     Id;
     char*                   Name;
 
-    // Currently the thread priority is not used for anything
+    LOCK                    PriorityProtectionLock;
+
+    // Effective priority of a thread
+    _Guarded_by_(PriorityProtectionLock)
     THREAD_PRIORITY         Priority;
+
+    // Original priority of a thread
+    _Guarded_by_(PriorityProtectionLock)
+    THREAD_PRIORITY         RealPriority;
+
     THREAD_STATE            State;
 
     // valid only if State == ThreadStateTerminated
@@ -64,6 +73,12 @@ typedef struct _THREAD
 
     // List of the threads in the same process
     LIST_ENTRY              ProcessList;
+
+    // List of mutexes held
+    LIST_ENTRY              AcquiredMutexesList;
+
+    // The mutex the thread waits for (blocked)
+    PMUTEX                  WaitedMutex;
 
     // Incremented on each clock tick for the running thread
     QWORD                   TickCountCompleted;
@@ -296,6 +311,43 @@ SetCurrentThread(
 void
 ThreadSetPriority(
     IN      THREAD_PRIORITY     NewPriority
+    );
+
+//******************************************************************************
+// Function:     ThreadDonatePriority
+// Description:  Called to donate priority and deal with the nested donation
+//               aspect.
+// Returns:      void
+// Parameter:    INOUT PMUTEX Mutex
+//******************************************************************************
+void
+ThreadDonatePriority(
+    IN      PMUTEX              Mutex
+    );
+
+//******************************************************************************
+// Function:     ThreadRecomputePriority
+// Description:  Called to recompute the priority of a thread just releasing
+//               a mutex.
+// Returns:      void
+// Parameter:    INOUT PTHREAD Thread
+//******************************************************************************
+void
+ThreadRecomputePriority(
+    INOUT   PTHREAD             Thread
+    );
+
+//******************************************************************************
+// Function:     ThreadSetWaitedMutex
+// Description:  Sets the thread's needed mutex
+// Returns:      void
+// Parameter:    INOUT PTHREAD Thread
+// Parameter:    IN_OPT PMUTEX Mutex
+//******************************************************************************
+void
+ThreadSetWaitedMutex(
+    INOUT   PTHREAD             Thread,
+    IN_OPT  PMUTEX              Mutex
     );
 
 //******************************************************************************

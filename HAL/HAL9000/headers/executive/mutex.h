@@ -19,6 +19,9 @@ typedef struct _MUTEX
     struct _THREAD*     Holder;
     
     LIST_ENTRY          AllList;
+
+    // Links this mutex into AcquiredMutexesList of the thread holding it
+    LIST_ENTRY          AcquiredMutexListElem;
 } MUTEX, *PMUTEX;
 
 //******************************************************************************

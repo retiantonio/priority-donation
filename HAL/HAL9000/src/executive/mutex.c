@@ -57,6 +57,7 @@ MutexInit(
     LockSetName(&Mutex->MutexLock, "MutexLock");
 
     InitializeListHead(&Mutex->WaitingList);
+    InitializeListHead(&Mutex->AcquiredMutexListElem);
 
     Mutex->MaxRecursivityDepth = Recursive ? MUTEX_MAX_RECURSIVITY_DEPTH : 1;
 
@@ -118,12 +119,20 @@ MutexAcquire(
     {
         Mutex->Holder = pCurrentThread;
         Mutex->CurrentRecursivityDepth = 1;
+
+        // right now current thread is a holder
+        InsertTailList(&pCurrentThread->AcquiredMutexesList, &Mutex->AcquiredMutexListElem);
     }
 
     while (Mutex->Holder != pCurrentThread)
     {
         //InsertTailList(&Mutex->WaitingList, &pCurrentThread->ReadyList);
         InsertOrderedList(&Mutex->WaitingList, &pCurrentThread->ReadyList, ThreadComparePriorityReadyList, NULL);
+
+        // not a holder
+        ThreadSetWaitedMutex(pCurrentThread, Mutex);
+        ThreadDonatePriority(Mutex);
+
         ThreadTakeBlockLock();
         LockRelease(&Mutex->MutexLock, dummyState);
         ThreadBlock();
@@ -146,9 +155,12 @@ MutexRelease(
 {
     INTR_STATE oldState;
     PLIST_ENTRY pEntry;
+    PTHREAD pCurrentThread;
 
     ASSERT(NULL != Mutex);
-    ASSERT(GetCurrentThread() == Mutex->Holder);
+
+    pCurrentThread = GetCurrentThread();
+    ASSERT(pCurrentThread == Mutex->Holder);
 
     if (Mutex->CurrentRecursivityDepth > 1)
     {
@@ -159,6 +171,9 @@ MutexRelease(
     pEntry = NULL;
 
     LockAcquire(&Mutex->MutexLock, &oldState);
+    
+    // deleting entry because thread no longer holds this mutex
+    RemoveEntryList(&Mutex->AcquiredMutexListElem);
 
     pEntry = RemoveHeadList(&Mutex->WaitingList);
     if (pEntry != &Mutex->WaitingList)
@@ -168,6 +183,10 @@ MutexRelease(
         // wakeup first thread
         Mutex->Holder = pThread;
         Mutex->CurrentRecursivityDepth = 1;
+
+        ThreadSetWaitedMutex(pThread, NULL);
+        InsertTailList(&pThread->AcquiredMutexesList, &Mutex->AcquiredMutexListElem);
+
         ThreadUnblock(pThread);
     }
     else
@@ -178,6 +197,8 @@ MutexRelease(
     _Analysis_assume_lock_released_(*Mutex);
 
     LockRelease(&Mutex->MutexLock, oldState);
+
+    ThreadRecomputePriority(pCurrentThread);
 }
 
 _No_competing_thread_

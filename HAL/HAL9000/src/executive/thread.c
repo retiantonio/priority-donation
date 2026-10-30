@@ -770,12 +770,15 @@ ThreadSetPriority(
 
     ASSERT(ThreadPriorityLowest <= NewPriority && NewPriority <= ThreadPriorityMaximum);
 
-    LockAcquire(&m_threadSystemData.ReadyThreadsLock, &oldState);
-
     pCurrentThread = GetCurrentThread();
+
     ASSERT(NULL != pCurrentThread);
 
-    pCurrentThread->Priority = NewPriority;
+    LockAcquire(&pCurrentThread->PriorityProtectionLock, &oldState);
+    pCurrentThread->RealPriority = NewPriority;
+    LockRelease(&pCurrentThread->PriorityProtectionLock, oldState);
+
+    LockAcquire(&m_threadSystemData.ReadyThreadsLock, &oldState);
 
     if(!IsListEmpty(&m_threadSystemData.ReadyThreadsList))
     {
@@ -783,6 +786,7 @@ ThreadSetPriority(
         ASSERT(NULL != pEntry);
 
         pHeadReadyThread = CONTAINING_RECORD(pEntry, THREAD, ReadyList);
+
         ASSERT(NULL != pHeadReadyThread);
 
         if(ThreadGetPriority(pHeadReadyThread) > pCurrentThread->Priority)
@@ -930,9 +934,17 @@ _ThreadInit(
         pThread->Id = _ThreadSystemGetNextTid();
         pThread->State = ThreadStateBlocked;
         pThread->Priority = Priority;
+        pThread->RealPriority = Priority;
 
         LockInit(&pThread->BlockLock);
         LockSetName(&pThread->BlockLock, "ThrBlock");
+
+        LockInit(&pThread->PriorityProtectionLock);
+        LockSetName(&pThread->PriorityProtectionLock, "ThreadPrio");
+
+        InitializeListHead(&pThread->AcquiredMutexesList);
+
+        pThread->WaitedMutex = NULL;
 
         LockAcquire(&m_threadSystemData.AllThreadsLock, &oldIntrState);
         InsertTailList(&m_threadSystemData.AllThreadsList, &pThread->AllList);
@@ -1346,6 +1358,8 @@ _ThreadDestroy(
     ExEventDestroy(&pThread->TerminationEvt);
     LockDestroy(&pThread->BlockLock);
 
+    LockDestroy(&pThread->PriorityProtectionLock);    
+
     if (NULL != pThread->Name)
     {
         ExFreePoolWithTag(pThread->Name, HEAP_THREAD_TAG);
@@ -1408,4 +1422,180 @@ ThreadComparePriorityReadyList(
     secondThreadPriority = ThreadGetPriority(pTh2);
 
     return (INT64)secondThreadPriority - (INT64)firstThreadPriority;
+}
+
+static
+BOOLEAN
+_ThreadRaisePriority(
+    INOUT   PTHREAD             Thread,
+    IN      THREAD_PRIORITY     NewPriority
+    )
+{
+    INTR_STATE oldState;
+    BOOLEAN raised;
+
+    raised = FALSE;
+
+    LockAcquire(&Thread->PriorityProtectionLock, &oldState);
+    if (Thread->Priority < NewPriority)
+    {
+        Thread->Priority = NewPriority;
+        raised = TRUE;
+    }
+    LockRelease(&Thread->PriorityProtectionLock, oldState);
+
+    return raised;
+}
+
+static
+THREAD_PRIORITY
+_ThreadGetMaxPriority(
+    IN      PTHREAD             Thread
+    )
+{   
+    INTR_STATE oldState;
+    PLIST_ENTRY pEntry;
+
+    THREAD_PRIORITY maxDonated;
+
+
+    ASSERT(NULL != Thread);
+
+    maxDonated = ThreadPriorityLowest;
+
+    for (
+        pEntry = Thread->AcquiredMutexesList.Flink;
+        pEntry != &Thread->AcquiredMutexesList;
+        pEntry = pEntry->Flink)
+    {
+        PMUTEX pMutex = CONTAINING_RECORD(pEntry, MUTEX, AcquiredMutexListElem);
+
+        LockAcquire(&pMutex->MutexLock, &oldState);
+        if(!IsListEmpty(&pMutex->WaitingList))
+        {
+            PTHREAD pWaiter = CONTAINING_RECORD(pMutex->WaitingList.Flink, THREAD, ReadyList);
+            THREAD_PRIORITY waiterPriority = ThreadGetPriority(pWaiter);
+
+            if(waiterPriority > maxDonated) 
+            {
+                maxDonated = waiterPriority;
+            }
+
+        }
+        LockRelease(&pMutex->MutexLock, oldState);
+    }
+
+    return maxDonated;
+}
+
+void
+ThreadSetWaitedMutex(
+    INOUT   PTHREAD             Thread,
+    IN_OPT  PMUTEX              Mutex
+    )
+{
+    INTR_STATE oldState;
+ 
+    ASSERT(NULL != Thread);
+ 
+    LockAcquire(&Thread->PriorityProtectionLock, &oldState);
+    Thread->WaitedMutex = Mutex;
+    LockRelease(&Thread->PriorityProtectionLock, oldState);
+}
+
+void
+ThreadDonatePriority(
+    IN      PMUTEX              Mutex    
+    )
+{   
+    INTR_STATE dummyState;
+
+    PTHREAD donorThread;
+    THREAD_PRIORITY donorPriority;
+    
+    PMUTEX pMutex;
+    PMUTEX pLockedExtra = NULL;
+
+    ASSERT(NULL != Mutex);
+    ASSERT(INTR_OFF == CpuIntrGetState());
+
+    donorThread = GetCurrentThread();
+    donorPriority = ThreadGetPriority(donorThread);
+
+    pMutex = Mutex;
+    while(NULL != pMutex) 
+    {
+        PTHREAD holder = pMutex->Holder;
+        PMUTEX pNextMutex;
+
+        if(NULL == holder)
+        {
+            // nobody has the lock
+            break;
+        }
+
+        if(!_ThreadRaisePriority(holder, donorPriority)) 
+        {   
+            // holder has high priority already
+            break;
+        }
+
+        // getting the waited mutex
+        LockAcquire(&holder->PriorityProtectionLock, &dummyState);
+        pNextMutex = holder->WaitedMutex;
+        LockRelease(&holder->PriorityProtectionLock, dummyState);
+
+        if(NULL == pNextMutex)
+        {   
+            // holder is not waiting for anything
+            break;
+        }
+
+        if(Mutex == pNextMutex)
+        {   
+            // got back to the first lock, deadlock
+            break;  
+        }
+
+        // this code is meant to preserve the state of a mutex
+        LockAcquire(&pNextMutex->MutexLock, &dummyState);
+        if(NULL != pLockedExtra)
+        {
+            LockRelease(&pLockedExtra->MutexLock, INTR_OFF);
+        }
+
+        pLockedExtra = pNextMutex;
+        
+        if (holder->WaitedMutex != pNextMutex)
+        {
+            break;
+        }
+
+        pMutex = pNextMutex;
+    }
+
+
+    // in case of a break
+    if(NULL != pLockedExtra) 
+    {
+        LockRelease(&pLockedExtra->MutexLock, INTR_OFF);
+    }
+}
+
+void
+ThreadRecomputePriority(
+    INOUT   PTHREAD             Thread
+    ) 
+{
+
+    INTR_STATE oldState;
+    THREAD_PRIORITY donated;
+
+    ASSERT(NULL != Thread);
+
+    donated = _ThreadGetMaxPriority(Thread);
+
+    LockAcquire(&Thread->PriorityProtectionLock, &oldState);
+    Thread->Priority = (Thread->RealPriority > donated) ? Thread->RealPriority : donated;
+    LockRelease(&Thread->PriorityProtectionLock, oldState);
 }
